@@ -61,11 +61,11 @@ const HERO_BUDGET_OPTIONS: [number, string][] = [
   [10000, "₹10,000"],
   [15000, "₹15,000"],
   [25000, "₹25,000"],
-  [40000, "₹40,000"],
-  [75000, "₹75,000"],
-  [150000, "₹1.5 Lakh"],
-  [300000, "₹3 Lakh"],
-  [600000, "₹6 Lakh"],
+  [50000, "₹50,000"],
+  [100000, "₹1,00,000"],
+  [200000, "₹2,00,000"],
+  [500000, "₹5,00,000"],
+  [1000000, "₹10,00,000"],
 ];
 const HERO_DAY_OPTIONS = [2, 3, 4, 5, 7, 10];
 
@@ -129,6 +129,7 @@ export function SafarPlanner() {
   // PWA install UI state
   const deferredInstallRef = useRef<BeforeInstallPromptEvent | null>(null);
   const [isIOS, setIsIOS] = useState<boolean>(false);
+  const [inApk, setInApk] = useState<boolean>(false);
   const [showInstallHero, setShowInstallHero] = useState<boolean>(false);
   const [showInstallChip, setShowInstallChip] = useState<boolean>(false);
   const [showIosSheet, setShowIosSheet] = useState<boolean>(false);
@@ -173,17 +174,33 @@ export function SafarPlanner() {
     const iosDetected =
       /iPad|iPhone|iPod/.test(ua) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const androidDetected = /android/i.test(navigator.userAgent);
     const standalone =
       window.matchMedia("(display-mode: standalone)").matches ||
       Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
+    const inApkDetected =
+      standalone ||
+      /[?&]source=(android|homescreen)/i.test(window.location.search);
     const mobile = window.matchMedia("(max-width: 860px)").matches;
-    const dismissed = (() => {
+    const isDismissed = () => {
       try {
-        return localStorage.getItem("safar-a2hs-dismissed") === "1";
+        return (
+          localStorage.getItem("safar-a2hs-dismissed") === "1" ||
+          localStorage.getItem("safar-install-dismissed") === "1"
+        );
       } catch {
         return false;
       }
-    })();
+    };
+    const win = window as Window & {
+      __safarDeferredPrompt?: BeforeInstallPromptEvent | null;
+    };
+    let androidChipTimer: ReturnType<typeof setTimeout> | null = null;
+    if (androidDetected && !inApkDetected && mobile) {
+      androidChipTimer = setTimeout(() => {
+        if (!isDismissed()) setShowInstallChip(true);
+      }, 6000);
+    }
 
     let cancelled = false;
     queueMicrotask(() => {
@@ -203,9 +220,13 @@ export function SafarPlanner() {
       }
 
       if (iosDetected) setIsIOS(true);
-      if (!standalone && mobile && iosDetected) {
+      if (inApkDetected) setInApk(true);
+      if (win.__safarDeferredPrompt) {
+        deferredInstallRef.current = win.__safarDeferredPrompt;
+      }
+      if (!standalone && mobile && (iosDetected || deferredInstallRef.current)) {
         setShowInstallHero(true);
-        if (!dismissed) setShowInstallChip(true);
+        if (!isDismissed()) setShowInstallChip(true);
       }
 
       // Parse initial URL hash (#trip=goa or #from=delhi&budget=10000&days=4)
@@ -225,13 +246,17 @@ export function SafarPlanner() {
 
     const onBeforeInstall = (e: Event) => {
       e.preventDefault();
-      deferredInstallRef.current = e as BeforeInstallPromptEvent;
+      const bip = e as BeforeInstallPromptEvent;
+      win.__safarDeferredPrompt = bip;
+      deferredInstallRef.current = bip;
       if (!standalone && mobile) {
         setShowInstallHero(true);
-        if (!dismissed) setShowInstallChip(true);
+        if (!isDismissed()) setShowInstallChip(true);
       }
     };
     const onInstalled = () => {
+      win.__safarDeferredPrompt = null;
+      deferredInstallRef.current = null;
       setShowInstallChip(false);
       setShowInstallHero(false);
       showToast("Safar added to your home screen 🎉");
@@ -275,6 +300,7 @@ export function SafarPlanner() {
 
     return () => {
       cancelled = true;
+      if (androidChipTimer) clearTimeout(androidChipTimer);
       window.removeEventListener("beforeinstallprompt", onBeforeInstall);
       window.removeEventListener("appinstalled", onInstalled);
       window.removeEventListener("hashchange", onHashChange);
@@ -1081,9 +1107,13 @@ export function SafarPlanner() {
   };
 
   const handleInstallPrompt = async () => {
+    const win = window as Window & {
+      __safarDeferredPrompt?: BeforeInstallPromptEvent | null;
+    };
     if (deferredInstallRef.current) {
       await deferredInstallRef.current.prompt();
       const { outcome } = await deferredInstallRef.current.userChoice;
+      win.__safarDeferredPrompt = null;
       deferredInstallRef.current = null;
       if (outcome === "accepted") {
         setShowInstallChip(false);
@@ -1100,6 +1130,7 @@ export function SafarPlanner() {
     setShowInstallChip(false);
     try {
       localStorage.setItem("safar-a2hs-dismissed", "1");
+      localStorage.setItem("safar-install-dismissed", "1");
     } catch {}
   };
 
@@ -1267,21 +1298,15 @@ export function SafarPlanner() {
               </select>
             </label>
           </div>
-          <div className={`hero-actions${isIOS ? " three" : ""}`}>
+          <div className={`hero-actions${isIOS || inApk ? " three" : ""}`}>
             <button
               id="startBtn"
               type="button"
               className="btn-primary big"
               onClick={handleStart}
             >
-              Find my trips →
+              Find my trips ✨
             </button>
-            {!isIOS && (
-              <Link id="apkHero" className="btn-app" href="/app/">
-                <span className="ico">🤖</span>
-                <span>Get Android app</span>
-              </Link>
-            )}
             <a
               id="waHero"
               className="wa-btn"
@@ -1292,9 +1317,15 @@ export function SafarPlanner() {
               <WhatsAppIcon />
               <span>Share on WhatsApp</span>
             </a>
+            {!isIOS && !inApk && (
+              <Link id="apkHero" className="btn-app" href="/app/">
+                <span className="ico">🤖</span>
+                <span>Get Android app</span>
+              </Link>
+            )}
             <Link id="ideasHero" className="btn-app" href="/guides/">
-              <span className="ico">📖</span>
-              <span>Trip ideas</span>
+              <span className="ico">🧭</span>
+              <span>Explore trip ideas</span>
             </Link>
           </div>
           {showInstallHero && (
@@ -1791,7 +1822,7 @@ export function SafarPlanner() {
                   [
                     ["match", "Best match"],
                     ["cheap", "Cheapest"],
-                    ["near", "Nearest"],
+                    ["near", "Closest"],
                     ["rating", "Top rated"],
                   ] as [SortType, string][]
                 ).map(([s, label]) => (
@@ -1962,15 +1993,10 @@ export function SafarPlanner() {
                 : "One-tap access from your home screen"}
             </small>
           </div>
-          {!isIOS && (
-            <a
-              id="apkChip"
-              className="apk-mini"
-              href={withBasePath("/downloads/safar-trip-planner.apk")}
-              download
-            >
+          {!isIOS && !inApk && (
+            <Link id="installApk" className="apk-mini" href="/app/">
               APK
-            </a>
+            </Link>
           )}
           <button
             id="installBtn"

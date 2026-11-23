@@ -68,7 +68,7 @@ export const metadata: Metadata = {
   },
 };
 
-const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem('safar-theme')||'light';if(t==='light')document.documentElement.setAttribute('data-theme','light');else document.documentElement.removeAttribute('data-theme');}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`;
+const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem('safar-theme')||'light';if(t==='light')document.documentElement.setAttribute('data-theme','light');else document.documentElement.removeAttribute('data-theme');}catch(e){document.documentElement.setAttribute('data-theme','light');}window.addEventListener('beforeinstallprompt',function(e){e.preventDefault();window.__safarDeferredPrompt=e;});})();`;
 
 export default function RootLayout({
   children,

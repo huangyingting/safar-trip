@@ -12,9 +12,18 @@ export function InstallPwaButton() {
   const [available, setAvailable] = useState(false);
 
   useEffect(() => {
+    const win = window as Window & {
+      __safarDeferredPrompt?: BeforeInstallPromptEvent | null;
+    };
+    if (win.__safarDeferredPrompt) {
+      deferredRef.current = win.__safarDeferredPrompt;
+      queueMicrotask(() => setAvailable(true));
+    }
     const onBeforeInstall = (e: Event) => {
       e.preventDefault();
-      deferredRef.current = e as BeforeInstallPromptEvent;
+      const bip = e as BeforeInstallPromptEvent;
+      win.__safarDeferredPrompt = bip;
+      deferredRef.current = bip;
       setAvailable(true);
     };
     window.addEventListener("beforeinstallprompt", onBeforeInstall);
@@ -31,7 +40,14 @@ export function InstallPwaButton() {
       style={{ cursor: "pointer", padding: "12px 16px" }}
       onClick={async () => {
         if (!deferredRef.current) return;
+        const win = window as Window & {
+          __safarDeferredPrompt?: BeforeInstallPromptEvent | null;
+        };
         await deferredRef.current.prompt();
+        try {
+          await deferredRef.current.userChoice;
+        } catch {}
+        win.__safarDeferredPrompt = null;
         deferredRef.current = null;
         setAvailable(false);
       }}
