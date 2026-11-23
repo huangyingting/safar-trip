@@ -108,6 +108,7 @@ function WhatsAppIcon() {
 
 export function SafarPlanner() {
   const defaultsRef = useRef<PlannerState>(createDefaults());
+  const [baseDate, setBaseDate] = useState<Date>(() => new Date());
   const [state, setState] = useState<PlannerState>(() => createDefaults());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [modeOverride, setModeOverride] = useState<Record<string, TransportModeId>>({});
@@ -136,12 +137,17 @@ export function SafarPlanner() {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const mapReadyRef = useRef<boolean>(false);
+  const [mapLoaded, setMapLoaded] = useState<boolean>(false);
   const markersRef = useRef<maplibregl.Marker[]>([]);
+  const resultsRef = useRef<EvaluatedTrip[]>([]);
   const originMarkerRef = useRef<maplibregl.Marker | null>(null);
   const planeMarkerRef = useRef<maplibregl.Marker | null>(null);
   const planeRafRef = useRef<number>(0);
   const spinningRef = useRef<boolean>(false);
+  const introRef = useRef<boolean>(true);
   const spinTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heroTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const homeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const detailScrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -182,6 +188,7 @@ export function SafarPlanner() {
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
+      setBaseDate(new Date());
       try {
         const saved = localStorage.getItem("safar-theme");
         const initialTheme = saved === "dark" ? "dark" : "light";
@@ -232,13 +239,36 @@ export function SafarPlanner() {
     window.addEventListener("beforeinstallprompt", onBeforeInstall);
     window.addEventListener("appinstalled", onInstalled);
 
-    const onHashChange = () => {
-      const nextParsed = readHash(window.location.hash, defaultsRef.current);
+    const onHashChange = (e: HashChangeEvent) => {
+      let rawHash = window.location.hash;
+      if (e?.newURL) {
+        try {
+          rawHash = new URL(e.newURL).hash;
+        } catch {}
+      }
+      if (window.location.hash !== rawHash) {
+        window.history.replaceState(
+          window.history.state,
+          "",
+          window.location.pathname + window.location.search + rawHash
+        );
+      }
+      const nextParsed = readHash(rawHash, defaultsRef.current);
       if (nextParsed) {
-        setState({ ...defaultsRef.current, ...nextParsed.patch });
+        let nextPatch = { ...nextParsed.patch };
+        if (nextParsed.trip && !nextParsed.patch.scope) {
+          const target = DESTINATIONS.find((d) => d.id === nextParsed.trip);
+          if (target?.intl) nextPatch = { ...nextPatch, scope: "all" };
+        }
+        setModeOverride({});
+        setState({ ...defaultsRef.current, ...nextPatch });
         setSelectedId(nextParsed.trip ?? null);
         setIntro(false);
         setHeroHidden(true);
+      } else if (!introRef.current) {
+        setModeOverride({});
+        setState({ ...defaultsRef.current });
+        setSelectedId(null);
       }
     };
     window.addEventListener("hashchange", onHashChange);
@@ -293,8 +323,9 @@ export function SafarPlanner() {
   useEffect(() => {
     if (intro) return;
     const hash = buildHash(state, defaultsRef.current, selectedId);
+    if (window.location.hash === hash) return;
     const targetUrl = window.location.pathname + window.location.search + hash;
-    window.history.replaceState(null, "", targetUrl);
+    window.history.replaceState(window.history.state, "", targetUrl);
   }, [state, selectedId, intro]);
 
   // Fetch live flight fares for current (from, month)
@@ -376,6 +407,14 @@ export function SafarPlanner() {
     [state, liveFares, modeOverride]
   );
 
+  useEffect(() => {
+    resultsRef.current = results;
+  }, [results]);
+
+  useEffect(() => {
+    introRef.current = intro;
+  }, [intro]);
+
   const selectedTrip: EvaluatedTrip | null = useMemo(() => {
     if (!selectedId) return null;
     const found = results.find((r) => r.d.id === selectedId);
@@ -399,10 +438,13 @@ export function SafarPlanner() {
   }, []);
 
   const startSpin = useCallback(() => {
-    if (!mapRef.current || spinningRef.current) return;
+    if (!introRef.current || !mapRef.current || spinningRef.current) return;
     spinningRef.current = true;
     const tick = () => {
-      if (!spinningRef.current || !mapRef.current) return;
+      if (!spinningRef.current || !introRef.current || !mapRef.current) {
+        spinningRef.current = false;
+        return;
+      }
       const c = mapRef.current.getCenter();
       mapRef.current.easeTo({
         center: [c.lng + 3, c.lat],
@@ -560,6 +602,7 @@ export function SafarPlanner() {
 
     let map: maplibregl.Map;
     try {
+      maplibregl.setWorkerUrl(withBasePath("/maplibre-gl-worker.js"));
       map = new maplibregl.Map({
         container: mapContainerRef.current,
         style: {
@@ -687,7 +730,8 @@ export function SafarPlanner() {
         },
       });
 
-      if (!window.location.hash || window.location.hash.length < 2) {
+      setMapLoaded(true);
+      if (introRef.current && (!window.location.hash || window.location.hash.length < 2)) {
         frameIntro(0);
         startSpin();
       }
@@ -698,7 +742,36 @@ export function SafarPlanner() {
     map.on("touchstart", onUserInteract);
     map.on("wheel", onUserInteract);
 
+    // On touch screens, CSS sets pointer-events: none on .pin so pinch/drag gestures pass through;
+    // tapping the map selects the nearest projected pin within 34px.
+    const touchOnly = window.matchMedia("(hover: none)").matches;
+    map.on("click", (e) => {
+      if (!touchOnly || !resultsRef.current.length) return;
+      let best: EvaluatedTrip | null = null;
+      let bestD = 34;
+      for (const r of resultsRef.current.slice(0, 24)) {
+        const p = map.project([r.d.lng, r.d.lat]);
+        const dist = Math.hypot(p.x - e.point.x, p.y - 14 - e.point.y);
+        if (dist < bestD) {
+          bestD = dist;
+          best = r;
+        }
+      }
+      if (best) {
+        setSelectedId(best.d.id);
+        setMobileTab("trips");
+        setSheetMin(false);
+      }
+    });
+
+    const ro = new ResizeObserver(() => {
+      map.resize();
+      if (introRef.current) frameIntro(0);
+    });
+    ro.observe(mapContainerRef.current);
+
     return () => {
+      ro.disconnect();
       stopSpin();
       cancelAnimationFrame(planeRafRef.current);
       mapReadyRef.current = false;
@@ -707,7 +780,17 @@ export function SafarPlanner() {
     };
   }, [frameIntro, startSpin, stopSpin]);
 
-  // Keep intro framing responsive on window resize
+  // Resize & re-fit map smoothly when mobile tab or sheet state changes
+  useEffect(() => {
+    if (intro) return;
+    const t = setTimeout(() => {
+      mapRef.current?.resize();
+      if (mobileTab === "map" && !selectedId) {
+        fitAll(resultsRef.current, currentOrigin);
+      }
+    }, 50);
+    return () => clearTimeout(t);
+  }, [mobileTab, sheetMin, intro, selectedId, currentOrigin, fitAll]);
   useEffect(() => {
     const onResize = () => {
       if (intro) frameIntro(0);
@@ -753,7 +836,7 @@ export function SafarPlanner() {
         );
       }
     } catch {}
-  }, [theme]);
+  }, [theme, mapLoaded]);
 
   // Sync map arcs, pins, origin marker, and route camera whenever results / selection / intro changes
   useEffect(() => {
@@ -786,8 +869,10 @@ export function SafarPlanner() {
       .setLngLat([currentOrigin.lng, currentOrigin.lat])
       .addTo(map);
 
+    const topResults = results.slice(0, 24);
+
     // Arcs GeoJSON
-    const features = results.map((r) => ({
+    const features = topResults.map((r) => ({
       type: "Feature" as const,
       properties: { id: r.d.id, within: r.within },
       geometry: {
@@ -802,26 +887,33 @@ export function SafarPlanner() {
     const arcsSrc = map.getSource("arcs") as maplibregl.GeoJSONSource | undefined;
     arcsSrc?.setData({ type: "FeatureCollection", features });
 
-    // Destination pins
-    results.forEach((r, i) => {
+    // Destination pins (inner .pin child keeps CSS keyframe/hover transforms off MapLibre's outer marker wrapper)
+    topResults.forEach((r, i) => {
       const el = document.createElement("div");
-      el.className = `pin ${r.within ? "within" : "over"}${selectedId === r.d.id ? " active" : ""}`;
-      el.style.animationDelay = `${Math.min(i * 35, 500)}ms`;
+      el.dataset.destId = r.d.id;
+      const pin = document.createElement("div");
+      pin.className = `pin ${r.within ? "within" : "over"}${selectedId === r.d.id ? " active" : ""}`;
+      pin.style.animationDelay = `${Math.min(i * 35, 500)}ms`;
       const em = document.createElement("span");
       em.className = "e";
       em.textContent = r.d.emoji;
       const nm = document.createElement("span");
-      nm.textContent = r.d.name.split(" & ")[0];
+      nm.textContent = r.d.name.split(" ")[0];
       const pr = document.createElement("span");
       pr.textContent = `· ${fmtK(r.cost.total)}`;
-      el.append(em, nm, pr);
+      pin.append(em, nm, pr);
+      el.appendChild(pin);
       el.addEventListener("click", (ev) => {
         ev.stopPropagation();
         setSelectedId(r.d.id);
         setMobileTab("trips");
         setSheetMin(false);
       });
-      const mk = new maplibregl.Marker({ element: el, anchor: "center" })
+      const mk = new maplibregl.Marker({
+        element: el,
+        anchor: "bottom",
+        offset: [0, -4],
+      })
         .setLngLat([r.d.lng, r.d.lat])
         .addTo(map);
       markersRef.current.push(mk);
@@ -835,6 +927,7 @@ export function SafarPlanner() {
       fitAll(results, currentOrigin);
     }
   }, [
+    mapLoaded,
     intro,
     results,
     selectedId,
@@ -876,12 +969,15 @@ export function SafarPlanner() {
   };
 
   const handleStart = () => {
+    if (heroTimerRef.current) clearTimeout(heroTimerRef.current);
+    if (homeTimerRef.current) clearTimeout(homeTimerRef.current);
     stopSpin();
+    mapRef.current?.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
     setHeroLeaving(true);
     setIntro(false);
     setMobileTab("trips");
     setSheetMin(false);
-    setTimeout(() => {
+    heroTimerRef.current = setTimeout(() => {
       setHeroHidden(true);
       setHeroLeaving(false);
     }, 550);
@@ -890,6 +986,8 @@ export function SafarPlanner() {
   const handleGoHome = (e: React.MouseEvent) => {
     e.preventDefault();
     if (intro) return;
+    if (heroTimerRef.current) clearTimeout(heroTimerRef.current);
+    if (homeTimerRef.current) clearTimeout(homeTimerRef.current);
     clearPlane();
     setSelectedId(null);
     setSheetMin(false);
@@ -902,10 +1000,10 @@ export function SafarPlanner() {
       "",
       window.location.pathname + window.location.search
     );
-    setTimeout(() => {
+    homeTimerRef.current = setTimeout(() => {
       mapRef.current?.resize();
       frameIntro(900);
-      setTimeout(startSpin, 950);
+      homeTimerRef.current = setTimeout(startSpin, 950);
     }, 20);
   };
 
@@ -956,6 +1054,30 @@ export function SafarPlanner() {
         ? prev.vibes.filter((v) => v !== id)
         : [...prev.vibes, id],
     }));
+  };
+
+  const highlightPin = useCallback(
+    (hoverId: string | null) => {
+      for (const mk of markersRef.current) {
+        const el = mk.getElement();
+        const id = el.dataset.destId;
+        const pin = el.querySelector(".pin");
+        pin?.classList.toggle("active", id === hoverId || id === selectedId);
+      }
+    },
+    [selectedId]
+  );
+
+  const handleSurprise = () => {
+    if (!results.length) {
+      showToast("No trips match. Loosen a filter first 🙂");
+      return;
+    }
+    const pool = results.slice(0, Math.min(8, results.length));
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    setSelectedId(pick.d.id);
+    setMobileTab("trips");
+    setSheetMin(false);
   };
 
   const handleInstallPrompt = async () => {
@@ -1019,22 +1141,6 @@ export function SafarPlanner() {
       : `Plan a trip in your budget on *Safar*:\n${appBaseUrl}`;
     return waUrl(msg);
   }, [results, currentOrigin.name, state, currentShareUrl, appBaseUrl]);
-
-  const handleShareListBtn = async () => {
-    if (typeof navigator !== "undefined" && navigator.share) {
-      try {
-        await navigator.share({
-          title: "Safar · Plan a trip in your budget",
-          text: `${results.length} trips from ${currentOrigin.name} under ${fmt(budgetPP(state))}/person`,
-          url: currentShareUrl,
-        });
-        return;
-      } catch (e) {
-        if ((e as Error)?.name === "AbortError") return;
-      }
-    }
-    copyShare(currentShareUrl, "Link copied · paste anywhere to share");
-  };
 
   const bpp = budgetPP(state);
   const bumpTarget =
@@ -1171,15 +1277,10 @@ export function SafarPlanner() {
               Find my trips →
             </button>
             {!isIOS && (
-              <a
-                id="apkHero"
-                className="btn-app"
-                href={withBasePath("/downloads/safar-trip-planner.apk")}
-                download
-              >
+              <Link id="apkHero" className="btn-app" href="/app/">
                 <span className="ico">🤖</span>
-                <span>Android app</span>
-              </a>
+                <span>Get Android app</span>
+              </Link>
             )}
             <a
               id="waHero"
@@ -1237,9 +1338,10 @@ export function SafarPlanner() {
             <select
               id="fromSelect"
               value={state.from}
-              onChange={(e) =>
-                setState((prev) => ({ ...prev, from: e.target.value }))
-              }
+              onChange={(e) => {
+                setModeOverride({});
+                setState((prev) => ({ ...prev, from: e.target.value }));
+              }}
             >
               {ORIGINS.map((o) => (
                 <option key={o.id} value={o.id}>
@@ -1382,11 +1484,19 @@ export function SafarPlanner() {
                 setState((prev) => ({ ...prev, month: Number(e.target.value) }))
               }
             >
-              {MONTHS.map((m, idx) => (
-                <option key={m} value={idx + 1}>
-                  {m}
-                </option>
-              ))}
+              {Array.from({ length: 12 }, (_, i) => {
+                const m = ((baseDate.getMonth() + i) % 12) + 1;
+                const y =
+                  baseDate.getFullYear() +
+                  (baseDate.getMonth() + i >= 12 ? 1 : 0);
+                const suffix =
+                  i === 0 ? " (this month)" : i === 1 ? " (next month)" : "";
+                return (
+                  <option key={m} value={m}>
+                    {`${MONTHS[m - 1]} ${y}${suffix}`}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
@@ -1492,7 +1602,10 @@ export function SafarPlanner() {
                   key={tr}
                   type="button"
                   className={state.transport === tr ? "on" : ""}
-                  onClick={() => setState((prev) => ({ ...prev, transport: tr }))}
+                  onClick={() => {
+                    setModeOverride({});
+                    setState((prev) => ({ ...prev, transport: tr }));
+                  }}
                 >
                   {label}
                 </button>
@@ -1551,7 +1664,7 @@ export function SafarPlanner() {
                 }
               />
               <span />
-              Hide off-season / monsoon washes
+              Hide off-season places
             </label>
             <label className="toggle">
               <input
@@ -1563,7 +1676,7 @@ export function SafarPlanner() {
                 }
               />
               <span />
-              Show slightly-over-budget (+20%)
+              Show slightly over budget (+20%)
             </label>
             <label className="toggle">
               <input
@@ -1575,7 +1688,7 @@ export function SafarPlanner() {
                 }
               />
               <span />
-              Prefer less-crowded / offbeat places
+              Offbeat / less crowded
             </label>
             <label className="toggle">
               <input
@@ -1587,7 +1700,7 @@ export function SafarPlanner() {
                 }
               />
               <span />
-              Travelling with kids
+              Good with kids
             </label>
             <label className="toggle">
               <input
@@ -1599,7 +1712,7 @@ export function SafarPlanner() {
                 }
               />
               <span />
-              Travelling with elders (easy pace)
+              Easy for elders (less walking)
             </label>
             <label className="toggle">
               <input
@@ -1611,7 +1724,7 @@ export function SafarPlanner() {
                 }
               />
               <span />
-              No passport yet
+              Easy visa / no passport needed
             </label>
           </div>
         </div>
@@ -1657,16 +1770,16 @@ export function SafarPlanner() {
                   rel="noopener noreferrer"
                   title="Share these trips on WhatsApp"
                 >
-                  WhatsApp
+                  💬 Share
                 </a>
                 <button
-                  id="shareAppBtn"
+                  id="surpriseBtn"
                   type="button"
                   className="btn-ghost"
-                  title="Copy or share link"
-                  onClick={handleShareListBtn}
+                  title="Pick a random great trip"
+                  onClick={handleSurprise}
                 >
-                  Share
+                  🎲 Surprise me
                 </button>
               </div>
             </div>
@@ -1734,6 +1847,8 @@ export function SafarPlanner() {
                       className={`card${selectedId === r.d.id ? " active" : ""}`}
                       style={{ animationDelay: `${Math.min(i * 30, 360)}ms` }}
                       onClick={() => setSelectedId(r.d.id)}
+                      onMouseEnter={() => highlightPin(r.d.id)}
+                      onMouseLeave={() => highlightPin(null)}
                     >
                       <div className="card-emoji">{r.d.emoji}</div>
                       <div className="card-main">
@@ -1743,9 +1858,9 @@ export function SafarPlanner() {
                         </div>
                         <div className="card-sub">
                           <span>
-                            {r.d.state} ·{" "}
+                            {r.d.state}
                             {r.mode
-                              ? `~${hrsLabel(r.mode.hrs)} by ${r.mode.name}`
+                              ? ` · ~${hrsLabel(r.mode.hrs)} by ${r.mode.name}`
                               : ""}
                           </span>
                           <span>per person</span>
@@ -1983,7 +2098,8 @@ function DetailView({
           <div>
             <h2>{d.name}</h2>
             <p>
-              {d.state} · ⭐ {d.rating} · {Math.round(r.km)} km away
+              {d.state} · ⭐ {d.rating} · {r.wx.icon} {r.wx.label} in{" "}
+              {MONTHS[state.month - 1]} · {r.score}% match
             </p>
           </div>
         </div>
@@ -1994,10 +2110,24 @@ function DetailView({
             <div className="val">{fmt(cost.total)}</div>
           </div>
           <div className="price-box">
-            <div className="lbl">
-              Total ({n} {n === 1 ? "traveller" : "travellers"})
-            </div>
+            <div className="lbl">Group of {n}</div>
             <div className="val">{fmt(cost.total * n)}</div>
+          </div>
+          <div className="price-box">
+            <div className="lbl">
+              {cost.total - budgetPP(state) <= 0 ? "You save" : "Over budget"}
+            </div>
+            <div
+              className="val"
+              style={{
+                color:
+                  cost.total - budgetPP(state) <= 0
+                    ? "var(--green)"
+                    : "var(--amber)",
+              }}
+            >
+              {fmt(Math.abs(cost.total - budgetPP(state)))}
+            </div>
           </div>
         </div>
       </div>
@@ -2037,38 +2167,44 @@ function DetailView({
         <div className="section">
           <h3>How to get there (round trip / person)</h3>
           <div className="opts">
-            {r.opts.map((o) => {
-              const badge = o.live ? (
-                <small style={{ color: "var(--green)" }}>
-                  📡 Live{o.live.airline ? ` · ${o.live.airline}` : ""} ·{" "}
-                  {agoLabel(o.live.fetched_at)}
-                </small>
-              ) : o.mode === "flight" && fk && !lf ? (
-                <small>Checking…</small>
-              ) : (
-                <small>est.</small>
-              );
+            {r.opts.length === 0 ? (
+              <p className="muted" style={{ margin: 0 }}>
+                Too close to need long-distance travel.
+              </p>
+            ) : (
+              r.opts.map((o) => {
+                const badge = o.live ? (
+                  <small style={{ color: "var(--green)" }}>
+                    📡 Live{o.live.airline ? ` · ${o.live.airline}` : ""} ·{" "}
+                    {agoLabel(o.live.fetched_at)}
+                  </small>
+                ) : o.mode === "flight" && fk && !lf ? (
+                  <small>Checking…</small>
+                ) : (
+                  <small>est.</small>
+                );
 
-              return (
-                <div
-                  key={o.mode}
-                  className={`opt${r.mode && r.mode.mode === o.mode ? " on" : ""}`}
-                  onClick={() => onPickMode(o.mode)}
-                >
-                  <span className="ico">{o.icon}</span>
-                  <div>
-                    <div className="nm">{o.name}</div>
-                    <div className="meta">
-                      ~{hrsLabel(o.hrs)} each way · {o.note}
+                return (
+                  <div
+                    key={o.mode}
+                    className={`opt${r.mode && r.mode.mode === o.mode ? " on" : ""}`}
+                    onClick={() => onPickMode(o.mode)}
+                  >
+                    <span className="ico">{o.icon}</span>
+                    <div>
+                      <div className="nm">{o.name}</div>
+                      <div className="meta">
+                        ~{hrsLabel(o.hrs)} each way · {o.note}
+                      </div>
+                    </div>
+                    <div className="pr">
+                      {fmt(o.cost)}
+                      {badge}
                     </div>
                   </div>
-                  <div className="pr">
-                    {fmt(o.cost)}
-                    {badge}
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </div>
 

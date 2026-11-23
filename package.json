@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "SKIP_FARE_PREFETCH=1 node scripts/fetch-fares.mjs",
     "dev": "next dev",
     "prebuild": "node scripts/fetch-fares.mjs",
     "build": "next build",

@@ -169,4 +169,66 @@ describe("Safar data & engine parity", () => {
     expect(itinerary(evLive, def)).toHaveLength(4);
     expect(waSafe("🏖️ Goa ✈️ ₹9,620")).toBe("Goa ✈ ₹9,620");
   });
+
+  it("handles edge-case filters: same-city <40km, visaEasy, elders, kids, offbeat, modeOverride, and 1-day itinerary", () => {
+    const def = createDefaults(new Date("2026-11-15T00:00:00Z"));
+
+    // Same-city origin (<40km): excluded from computeResults, and evaluate() returns 0 long-distance opts
+    const jaipurDest = DESTINATIONS.find((d) => d.id === "jaipur")!;
+    const sameCityState = { ...def, from: "jaipur", hideOff: false, budget: 100000 };
+    const { results: fromJaipur } = computeResults(sameCityState);
+    expect(fromJaipur.some((r) => r.d.id === "jaipur")).toBe(false);
+    const sameCityEval = evaluate(jaipurDest, sameCityState);
+    expect(sameCityEval.opts).toHaveLength(0);
+    expect(sameCityEval.mode).toBeNull();
+    expect(sameCityEval.cost.travel).toBe(0);
+
+    // Abroad + nopass (Easy visa / no passport needed): keeps only d.visaEasy destinations
+    const { results: easyVisa } = computeResults({
+      ...def,
+      scope: "intl",
+      budget: 250000,
+      nopass: true,
+      hideOff: false,
+    });
+    expect(easyVisa.length).toBeGreaterThan(0);
+    expect(easyVisa.every((r) => r.d.visaEasy === true)).toBe(true);
+    expect(easyVisa.some((r) => r.d.id === "dubai")).toBe(false);
+
+    // Elders & kids filters exclude non-easy / high-altitude destinations
+    const { results: forSeniors } = computeResults({
+      ...def,
+      budget: 150000,
+      seniors: true,
+      hideOff: false,
+    });
+    expect(forSeniors.every((r) => Boolean(r.d.easy))).toBe(true);
+    expect(forSeniors.some((r) => r.d.id === "ladakh")).toBe(false);
+
+    const { results: forKids } = computeResults({
+      ...def,
+      budget: 150000,
+      kids: true,
+      hideOff: false,
+    });
+    expect(forKids.every((r) => !r.d.noKids)).toBe(true);
+
+    // Offbeat filter restricts strictly to offbeat places
+    const { results: offbeatOnly } = computeResults({
+      ...def,
+      budget: 150000,
+      offbeat: true,
+      hideOff: false,
+    });
+    expect(offbeatOnly.length).toBeGreaterThan(0);
+    expect(offbeatOnly.every((r) => Boolean(r.d.offbeat))).toBe(true);
+
+    // Mode override switches transport & 1-day itinerary generates Quick getaway
+    const goaDest = DESTINATIONS.find((d) => d.id === "goa")!;
+    const trainOverride = evaluate(goaDest, { ...def, budget: 50000 }, {}, { goa: "train" });
+    expect(trainOverride.mode?.mode).toBe("train");
+    const oneDay = itinerary(trainOverride, { from: "delhi", days: 1 });
+    expect(oneDay).toHaveLength(1);
+    expect(oneDay[0].title).toBe("Quick getaway");
+  });
 });

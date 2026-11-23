@@ -3,6 +3,14 @@ import { resolve } from "node:path";
 
 const UPSTREAM = process.env.FARE_UPSTREAM || "https://safar-fares.safar-trips.workers.dev";
 const OUT_FILE = resolve(process.cwd(), "public/fares-cache.json");
+const WORKER_SRC = resolve(process.cwd(), "node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs");
+const WORKER_DEST = resolve(process.cwd(), "public/maplibre-gl-worker.js");
+
+function syncMaplibreWorker() {
+  if (!existsSync(WORKER_SRC)) return;
+  const raw = readFileSync(WORKER_SRC, "utf8").replace(/\/\/# sourceMappingURL=.*$/m, "");
+  writeFileSync(WORKER_DEST, raw);
+}
 
 const ORIGIN_IATAS = ["DEL", "BOM", "BLR", "MAA", "CCU", "HYD", "PNQ", "AMD", "JAI", "COK"];
 const DEST_IATAS = [
@@ -42,6 +50,7 @@ async function fetchOne(from, to, month) {
 }
 
 async function main() {
+  syncMaplibreWorker();
   if (process.env.SKIP_FARE_PREFETCH === "1") {
     if (!existsSync(OUT_FILE)) {
       writeFileSync(OUT_FILE, JSON.stringify({ generated_at: new Date().toISOString(), fares: {} }));
